@@ -1,0 +1,6 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python run_all.py"
+restartPolicyType = "ON_FAILURE"
