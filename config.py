@@ -5,3 +5,6 @@ ADMIN_IDS = [8996873568]                  # твои Telegram ID (кто име�
 
 DB_PATH = "shop.db"
 LTC_WALLET = "ltc1qxxxxxxxxxxxxxxxxxxxxxx"  # стартовый адрес, меняется в админ-боте
+DB_PATH = "shop.db"
+LTC_WALLET = "ltc1qxxxxxxxxxxxxxxxxxxxxxx"  # стартовый адрес, меняется в админ-боте
+SUPPORT_USERNAME = "@catiklulu" '# твой юзернейм для кнопки «Поддержка»
