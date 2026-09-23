@@ -13,8 +13,6 @@ from db import (init_db, add_product, del_product, get_products, get_orders,
 bot = Bot(token=ADMIN_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-main_bot_link = None  # для уведомлений клиентам (см. main() — берём из конфига)
-
 class NewProduct(StatesGroup):
     name = State(); price = State(); desc = State()
 
@@ -33,91 +31,133 @@ def main_kb():
         [InlineKeyboardButton(text="💼 Сменить LTC-кошелёк", callback_data="wallet")]
     ])
 
+def menu_btn():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="panel")]])
+
+async def render_panel(msg, user_id):
+    wallet = await get_setting(DB_PATH, "ltc_wallet")
+    await msg.edit_text(
+        f"🎛 *Админ-панель магазина*\n💼 Кошелёк: `{wallet}`",
+        parse_mode="Markdown", reply_markup=main_kb())
+
 @dp.message(Command("start", "admin"))
 async def admin_panel(m: Message):
     if not is_admin(m.from_user.id):
         return await m.answer("⛔ Доступ запрещён.")
     wallet = await get_setting(DB_PATH, "ltc_wallet")
-    await m.answer(f"🎛 Админ-панель магазина\n💼 Текущий кошелёк: `{wallet}`",
+    await m.answer(f"🎛 *Админ-панель магазина*\n💼 Кошелёк: `{wallet}`",
                    parse_mode="Markdown", reply_markup=main_kb())
 
-# --- публикация товара ---
+@dp.callback_query(F.data == "panel")
+async def panel(c: CallbackQuery):
+    await render_panel(c.message, c.from_user.id)
+
+# --- публикация товара (всё в одном окне) ---
 @dp.callback_query(F.data == "add")
 async def add_start(c: CallbackQuery, state: FSMContext):
     await state.set_state(NewProduct.name)
-    await c.message.answer("Введите название товара:")
+    msg = await c.message.edit_text("➕ *Новый товар*\n\nВведите название товара:",
+                                    parse_mode="Markdown", reply_markup=menu_btn())
+    await state.update_data(mid=msg.message_id)
+
+async def edit_step(m: Message, state: FSMContext, text):
+    data = await state.get_data()
+    try:
+        await m.bot.edit_message_text(text, chat_id=m.chat.id,
+                                      message_id=data["mid"],
+                                      parse_mode="Markdown", reply_markup=menu_btn())
+    except Exception:
+        pass
+    await m.delete()  # убираем сообщение пользователя, чтобы окно не плодилось
 
 @dp.message(NewProduct.name)
 async def add_name(m: Message, state: FSMContext):
     await state.update_data(name=m.text)
     await state.set_state(NewProduct.price)
-    await m.answer("Введите цену в долларах (число):")
+    await edit_step(m, state, f"➕ *Новый товар*\n\nНазвание: *{m.text}*\n\nТеперь введите цену в долларах (число):")
 
 @dp.message(NewProduct.price)
 async def add_price(m: Message, state: FSMContext):
     try:
         price = float(m.text.replace(",", "."))
     except ValueError:
-        return await m.answer("Нужно число, например 25 или 19.99. Попробуйте ещё раз:")
+        await m.delete()
+        return await m.bot.send_message(m.chat.id, "⚠️ Нужно число, например 25 или 19.99. Введите ещё раз:")
     await state.update_data(price=price)
     await state.set_state(NewProduct.desc)
-    await m.answer("Введите описание товара:")
+    await edit_step(m, state, f"➕ *Новый товар*\n\nНазвание: *{(await state.get_data())['name']}*\nЦена: *{price}$*\n\nТеперь введите описание:")
 
 @dp.message(NewProduct.desc)
 async def add_desc(m: Message, state: FSMContext):
     data = await state.get_data()
     pid = await add_product(DB_PATH, data["name"], data["price"], m.text)
     await state.clear()
-    await m.answer(f"✅ Товар #{pid} «{data['name']}» опубликован — уже виден в основном боте!",
-                   reply_markup=main_kb())
+    await m.delete()
+    try:
+        await m.bot.edit_message_text(
+            f"✅ Товар #{pid} «{data['name']}» опубликован — уже виден в основном боте!",
+            chat_id=m.chat.id, message_id=data["mid"], reply_markup=main_kb())
+    except Exception:
+        await m.answer(f"✅ Товар #{pid} «{data['name']}» опубликован!",
+                       reply_markup=main_kb())
 
-# --- товары ---
+# --- товары (одно окно) ---
 @dp.callback_query(F.data == "list")
 async def list_products(c: CallbackQuery):
     products = await get_products(DB_PATH)
     if not products:
-        return await c.answer("Товаров нет.", show_alert=True)
-    for p in products:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🗑 Снять с продажи", callback_data=f"del_{p[0]}")]])
-        await c.message.answer(f"#{p[0]} {p[1]} — {p[2]}$\n{p[3][:200]}", reply_markup=kb)
-    await c.answer()
+        return await c.message.edit_text("📦 Товаров нет.", reply_markup=menu_btn())
+    rows = [[InlineKeyboardButton(text=f"🗑 #{p[0]} {p[1]} — {p[2]}$",
+                                  callback_data=f"del_{p[0]}")] for p in products]
+    rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="panel")])
+    txt = "📦 *Товары в продаже:*\n\n" + "\n".join(
+        f"#{p[0]} {p[1]} — {p[2]}$\n{p[3][:150]}" for p in products)
+    await c.message.edit_text(txt, parse_mode="Markdown",
+                              reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @dp.callback_query(F.data.startswith("del_"))
 async def del_p(c: CallbackQuery):
     await del_product(DB_PATH, int(c.data.split("_")[1]))
-    await c.message.edit_text(c.message.text + "\n\n❌ Снят с продажи")
+    await c.answer("Снят с продажи ✅")
+    await list_products(c)
 
-# --- кошелёк ---
+# --- кошелёк (одно окно) ---
 @dp.callback_query(F.data == "wallet")
 async def wallet_start(c: CallbackQuery, state: FSMContext):
     cur = await get_setting(DB_PATH, "ltc_wallet")
     await state.set_state(NewWallet.address)
-    await c.message.answer(f"Текущий адрес: `{cur}`\n\nВведите новый LTC-адрес:",
-                           parse_mode="Markdown")
+    msg = await c.message.edit_text(f"💼 *Смена кошелька*\n\nТекущий: `{cur}`\n\nВведите новый LTC-адрес:",
+                                    parse_mode="Markdown", reply_markup=menu_btn())
+    await state.update_data(mid=msg.message_id)
 
 @dp.message(NewWallet.address)
 async def wallet_set(m: Message, state: FSMContext):
     addr = m.text.strip()
     if not (addr.startswith("ltc1") or addr.startswith("L") or addr.startswith("M")):
-        await m.answer("⚠️ Это не похоже на LTC-адрес. Проверьте и введите ещё раз:")
-        return
+        await m.delete()
+        return await m.bot.send_message(m.chat.id, "⚠️ Это не похоже на LTC-адрес. Проверьте и введите ещё раз:")
     await set_setting(DB_PATH, "ltc_wallet", addr)
+    data = await state.get_data()
     await state.clear()
-    await m.answer(f"✅ Кошелёк обновлён: `{addr}`", parse_mode="Markdown",
-                   reply_markup=main_kb())
+    await m.delete()
+    try:
+        await m.bot.edit_message_text(f"✅ Кошелёк обновлён: `{addr}`",
+                                      chat_id=m.chat.id, message_id=data["mid"],
+                                      parse_mode="Markdown", reply_markup=main_kb())
+    except Exception:
+        await m.answer(f"✅ Кошелёк обновлён: `{addr}`", reply_markup=main_kb())
 
 # --- заказы и подтверждение оплат ---
 @dp.callback_query(F.data == "orders")
 async def orders(c: CallbackQuery):
     ords = await get_orders(DB_PATH)
     if not ords:
-        return await c.answer("Заказов пока нет.", show_alert=True)
+        return await c.message.edit_text("🧾 Заказов пока нет.", reply_markup=menu_btn())
     ic = {"waiting": "⏳", "paid": "✅", "rejected": "❌"}
-    txt = "\n".join(f"{ic.get(o[4],'')} #{o[0]} | {o[1]} | {o[3]}$ | {o[5]}"
-                     for o in ords[:30])
-    await c.message.answer("🧾 Последние заказы:\n" + txt)
-    await c.answer()
+    txt = "🧾 *Последние заказы:*\n\n" + "\n".join(
+        f"{ic.get(o[4],'')} #{o[0]} | {o[1]} | {o[3]}$ | {o[5]}" for o in ords[:30])
+    await c.message.edit_text(txt, parse_mode="Markdown", reply_markup=menu_btn())
 
 @dp.callback_query(F.data.startswith("ok_"))
 async def confirm(c: CallbackQuery):
@@ -136,18 +176,18 @@ async def reject(c: CallbackQuery):
     o = await get_order(DB_PATH, oid)
     await c.message.edit_text(c.message.text + "\n\n❌ ОТКЛОНЁН")
     from main_bot import bot as client_bot
-    await client_bot.send_message(o[2], f"❌ Заказ #{oid} отклонён. Если вы оплатили — напишите менеджеру.")
+    await client_bot.send_message(o[2], f"❌ Заказ #{oid} отклонён. Если вы оплатили — напишите в поддержку.")
     await c.answer("Отклонён")
 
 # --- статистика ---
 @dp.callback_query(F.data == "stats")
 async def stats(c: CallbackQuery):
     s = await get_stats(DB_PATH)
-    await c.message.answer(
-        f"📊 Статистика\n├ Товаров в продаже: {s['products']}\n"
+    await c.message.edit_text(
+        f"📊 *Статистика*\n├ Товаров в продаже: {s['products']}\n"
         f"├ Заказов всего: {s['orders']}\n├ Оплачено: {s['paid']}\n"
-        f"└ Выручка: {s['revenue']}$", reply_markup=main_kb())
-    await c.answer()
+        f"└ Выручка: {s['revenue']}$",
+        parse_mode="Markdown", reply_markup=main_kb())
 
 async def main():
     await init_db(DB_PATH)
